@@ -17,8 +17,6 @@ class UserType(graphene.ObjectType):
     name = graphene.String()
     username = graphene.String()
     email = graphene.String()
-    height = graphene.String()
-    weight = graphene.String()
 
 # Queries
 class Query(graphene.ObjectType):
@@ -42,12 +40,10 @@ class SignupMutation(graphene.Mutation):
         name = graphene.String(required=True)
         password = graphene.String(required=True)
         email = graphene.String(required=True)
-        height = graphene.String(required=True)
-        weight = graphene.String(required=True)
 
     user = graphene.Field(UserType)
 
-    def mutate(self, info, username, name, password, email, height, weight):
+    def mutate(self, info, username, name, password, email):
         try:
             cognito_client.sign_up(
                 ClientId=settings.COGNITO_CLIENT_ID,
@@ -55,9 +51,7 @@ class SignupMutation(graphene.Mutation):
                 Password=password,
                 UserAttributes=[
                     {'Name': 'email', 'Value': email},
-                    {'Name': 'name', 'Value': name},
-                    {'Name': 'custom:height', 'Value': height},
-                    {'Name': 'custom:weight', 'Value': weight}
+                    {'Name': 'name', 'Value': name}
                 ]
             )
             return SignupMutation(user=UserType(username=username, email=email))
