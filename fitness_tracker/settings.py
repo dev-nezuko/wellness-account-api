@@ -19,8 +19,7 @@ from fitness_tracker.env import env_list, env_origins
 
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+# boto3 finds AWS credentials itself; the public client flows used here need none.
 COGNITO_REGION = os.getenv('COGNITO_REGION')
 COGNITO_USER_POOL_ID = os.getenv('COGNITO_USER_POOL_ID')
 COGNITO_CLIENT_ID = os.getenv('COGNITO_CLIENT_ID')

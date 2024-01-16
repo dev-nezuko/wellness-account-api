@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+!.env.example
+.venv
+project_venv
+**/__pycache__
+*.pyc
+*.sqlite3
+.ruff_cache
+docs

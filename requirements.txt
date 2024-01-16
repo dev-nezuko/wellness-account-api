@@ -7,3 +7,4 @@ boto3==1.43.127
 python-dotenv==1.2.4
 PyJWT[crypto]==2.15.1
 cryptography==50.0.2
+gunicorn==27.0.0
