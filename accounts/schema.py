@@ -1,13 +1,15 @@
 import graphene
 import boto3
 from botocore.exceptions import ClientError
-
-COGNITO_USER_POOL_ID = 'eu-north-1_6Yucu5ItA'
-COGNITO_CLIENT_ID = '5g7inc6rbu678beipjgq74fjod'
-COGNITO_REGION = 'eu-north-1'
+from django.conf import settings
 
 # Initialize Cognito client
-cognito_client = boto3.client('cognito-idp', region_name=COGNITO_REGION)
+cognito_client = boto3.client(
+    'cognito-idp',
+    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+    region_name=settings.COGNITO_REGION
+)
 
 # User type
 class UserType(graphene.ObjectType):
@@ -25,7 +27,7 @@ class Query(graphene.ObjectType):
     def resolve_get_user(self, info, username):
         try:
             response = cognito_client.admin_get_user(
-                UserPoolId=COGNITO_USER_POOL_ID,
+                UserPoolId=settings.COGNITO_USER_POOL_ID,
                 Username=username
             )
             user_attributes = {attr['Name']: attr['Value'] for attr in response['UserAttributes']}
@@ -48,7 +50,7 @@ class SignupMutation(graphene.Mutation):
     def mutate(self, info, username, name, password, email, height, weight):
         try:
             cognito_client.sign_up(
-                ClientId=COGNITO_CLIENT_ID,
+                ClientId=settings.COGNITO_CLIENT_ID,
                 Username=username,
                 Password=password,
                 UserAttributes=[
@@ -72,7 +74,7 @@ class UserConfirmationMutation(graphene.Mutation):
     def mutate(self, info, username, otp):
         try:
             cognito_client.confirm_sign_up(
-                ClientId=COGNITO_CLIENT_ID,
+                ClientId=settings.COGNITO_CLIENT_ID,
                 Username=username,
                 ConfirmationCode=otp
             )
@@ -95,14 +97,14 @@ class SigninMutation(graphene.Mutation):
     def mutate(self, info, username, password):
         try:
             res = cognito_client.initiate_auth(
-                ClientId=COGNITO_CLIENT_ID,
+                ClientId=settings.COGNITO_CLIENT_ID,
                 AuthFlow='USER_PASSWORD_AUTH',
                 AuthParameters={'USERNAME': username, 'PASSWORD': password}
             )
             token = res['AuthenticationResult']['AccessToken']
             rtoken = res['AuthenticationResult']['RefreshToken']
             response = cognito_client.admin_get_user(
-                UserPoolId=COGNITO_USER_POOL_ID,
+                UserPoolId=settings.COGNITO_USER_POOL_ID,
                 Username=username
             )
             user_attributes = {attr['Name']: attr['Value'] for attr in response['UserAttributes']}

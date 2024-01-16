@@ -11,6 +11,16 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+COGNITO_REGION = os.getenv('COGNITO_REGION')
+COGNITO_USER_POOL_ID = os.getenv('COGNITO_USER_POOL_ID')
+COGNITO_CLIENT_ID = os.getenv('COGNITO_CLIENT_ID')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -55,9 +65,7 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'fitness_tracker.urls'
 
-CORS_ORIGIN_WHITELIST = [
-    'http://localhost:3000',  # React's default port
-]
+CORS_ALLOW_ALL_ORIGINS = True
 
 TEMPLATES = [
     {
