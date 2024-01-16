@@ -1,11 +1,37 @@
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import boto3
+import jwt
 from botocore.stub import Stubber
+from cryptography.hazmat.primitives.asymmetric import rsa
 from django.test import SimpleTestCase
 
 from accounts.schema import schema
+from accounts.tokens import cognito_issuer, jwks_client
+
+# Generated per test run; the stubbed JWKS below is the only key set the code sees.
+SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+OTHER_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+KEY_ID = 'offline-test-key'
+STUB_JWKS = {'keys': [{**jwt.algorithms.RSAAlgorithm.to_jwk(SIGNING_KEY.public_key(), as_dict=True), 'kid': KEY_ID, 'alg': 'RS256', 'use': 'sig'}]}
+
+
+def access_token(key=SIGNING_KEY, kid=KEY_ID, algorithm='RS256', **overrides):
+    now = int(time.time())
+    claims = {
+        'sub': 'synthetic-user-id',
+        'iss': cognito_issuer(),
+        'client_id': 'offline-client-id',
+        'token_use': 'access',
+        'username': 'synthetic-user',
+        'iat': now,
+        'exp': now + 600,
+    }
+    claims.update(overrides)
+    claims = {name: value for name, value in claims.items() if value is not None}
+    return jwt.encode(claims, key, algorithm=algorithm, headers={'kid': kid})
 
 ATTRS = [
     {'Name': 'sub', 'Value': 'synthetic-user-id'},
@@ -31,6 +57,11 @@ class StubbedCognitoTestCase(SimpleTestCase):
         patcher = patch('accounts.schema.get_cognito_client', return_value=client)
         patcher.start()
         self.addCleanup(patcher.stop)
+        jwks_client.cache_clear()
+        jwks_patcher = patch('jwt.PyJWKClient.fetch_data', return_value=STUB_JWKS)
+        self.jwks_fetch = jwks_patcher.start()
+        self.addCleanup(jwks_patcher.stop)
+        self.token = access_token()
 
     def execute(self, query, authorization=None):
         headers = {} if authorization is None else {'Authorization': authorization}
@@ -44,17 +75,17 @@ class AccountSchemaTests(StubbedCognitoTestCase):
         self.cognito.assert_no_pending_responses()
 
     def test_lookup_returns_only_token_owner(self):
-        self.cognito.add_response('get_user', PROFILE, {'AccessToken': 'offline-access'})
-        result = self.execute('{ getUser(username:"synthetic-user") { id username email } }', 'Bearer offline-access')
+        self.cognito.add_response('get_user', PROFILE, {'AccessToken': self.token})
+        result = self.execute('{ getUser(username:"synthetic-user") { id username email } }', f'Bearer {self.token}')
         self.assertIsNone(result.errors)
         self.assertEqual(result.data['getUser']['id'], 'synthetic-user-id')
         self.cognito.assert_no_pending_responses()
 
     def test_lookup_rejects_other_user(self):
-        self.cognito.add_response('get_user', PROFILE, {'AccessToken': 'offline-access'})
-        result = self.execute('{ getUser(username:"another-user") { email } }', 'Bearer offline-access')
+        result = self.execute('{ getUser(username:"another-user") { email } }', f'Bearer {self.token}')
         self.assertTrue(result.errors)
         self.assertIsNone(result.data['getUser'])
+        self.cognito.assert_no_pending_responses()
 
     def test_signin_reads_profile_using_returned_access_token(self):
         self.cognito.add_response(
@@ -74,7 +105,7 @@ class AccountSchemaTests(StubbedCognitoTestCase):
 
     def test_provider_error_does_not_expose_details(self):
         self.cognito.add_client_error('get_user', 'NotAuthorizedException', 'PRIVATE_PROVIDER_DIAGNOSTIC')
-        result = self.execute('{ getUser(username:"synthetic-user") { email } }', 'Bearer offline-access')
+        result = self.execute('{ getUser(username:"synthetic-user") { email } }', f'Bearer {self.token}')
         self.assertTrue(result.errors)
         self.assertNotIn('PRIVATE_PROVIDER_DIAGNOSTIC', str(result.errors))
 
@@ -96,14 +127,79 @@ class AccountSchemaTests(StubbedCognitoTestCase):
         self.cognito.assert_no_pending_responses()
 
 
+class AccessTokenVerificationTests(StubbedCognitoTestCase):
+    QUERY = '{ getUser(username:"synthetic-user") { username } }'
+
+    def assert_rejected(self, token):
+        result = self.execute(self.QUERY, f'Bearer {token}')
+        self.assertIn('invalid or expired', str(result.errors[0]))
+        # Rejected locally: Cognito is never asked about a token that fails verification.
+        self.cognito.assert_no_pending_responses()
+
+    def test_valid_token_is_checked_against_the_pool_jwks(self):
+        self.cognito.add_response('get_user', PROFILE, {'AccessToken': self.token})
+        result = self.execute(self.QUERY, f'Bearer {self.token}')
+        self.assertIsNone(result.errors)
+        self.jwks_fetch.assert_called_once()
+        pool_jwks = 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_OfflinePool/.well-known/jwks.json'
+        jwks_client(pool_jwks)
+        self.assertEqual(jwks_client.cache_info().hits, 1)
+
+    def test_rejects_token_signed_by_another_key(self):
+        self.assert_rejected(access_token(key=OTHER_KEY))
+
+    def test_rejects_unknown_key_id(self):
+        self.assert_rejected(access_token(kid='not-in-the-pool'))
+
+    def test_rejects_symmetric_algorithm(self):
+        self.assert_rejected(access_token(key='offline-shared-secret-of-32-bytes!', algorithm='HS256'))
+
+    def test_rejects_unsigned_token(self):
+        self.assert_rejected(access_token(key=None, algorithm='none'))
+
+    def test_rejects_other_issuer(self):
+        self.assert_rejected(access_token(iss='https://cognito-idp.us-east-1.amazonaws.com/us-east-1_OtherPool'))
+
+    def test_rejects_other_app_client(self):
+        self.assert_rejected(access_token(client_id='another-client-id'))
+
+    def test_rejects_id_token(self):
+        self.assert_rejected(access_token(token_use='id'))
+
+    def test_rejects_expired_token(self):
+        self.assert_rejected(access_token(iat=int(time.time()) - 3600, exp=int(time.time()) - 60))
+
+    def test_rejects_token_missing_expiry(self):
+        self.assert_rejected(access_token(exp=None))
+
+    def test_rejects_malformed_token(self):
+        self.assert_rejected('not-a-jwt')
+
+    def test_rejects_token_for_another_username_before_calling_cognito(self):
+        result = self.execute('{ getUser(username:"another-user") { username } }', f'Bearer {self.token}')
+        self.assertIn('Only your own', str(result.errors[0]))
+        self.cognito.assert_no_pending_responses()
+
+    def test_revoked_token_is_still_rejected_by_cognito(self):
+        self.cognito.add_client_error('get_user', 'NotAuthorizedException', 'Access Token has been revoked')
+        result = self.execute(self.QUERY, f'Bearer {self.token}')
+        self.assertTrue(result.errors)
+        self.cognito.assert_no_pending_responses()
+
+    def test_unreachable_key_set_is_reported_without_details(self):
+        self.jwks_fetch.side_effect = jwt.PyJWKClientConnectionError('PRIVATE_NETWORK_DIAGNOSTIC')
+        result = self.execute(self.QUERY, f'Bearer {self.token}')
+        self.assertEqual(result.errors[0].message, 'Account service is unavailable')
+
+
 class GraphQLEndpointTests(StubbedCognitoTestCase):
     def test_http_endpoint_serves_the_schema(self):
-        self.cognito.add_response('get_user', PROFILE, {'AccessToken': 'offline-access'})
+        self.cognito.add_response('get_user', PROFILE, {'AccessToken': self.token})
         response = self.client.post(
             '/graphql',
             {'query': '{ getUser(username:"synthetic-user") { username } }'},
             content_type='application/json',
-            HTTP_AUTHORIZATION='Bearer offline-access',
+            HTTP_AUTHORIZATION=f'Bearer {self.token}',
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'data': {'getUser': {'username': 'synthetic-user'}}})

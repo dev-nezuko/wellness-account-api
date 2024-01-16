@@ -5,3 +5,5 @@ graphql-core==3.2.14
 django-cors-headers==4.9.0
 boto3==1.43.127
 python-dotenv==1.2.4
+PyJWT[crypto]==2.15.1
+cryptography==50.0.2

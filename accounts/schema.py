@@ -6,11 +6,17 @@ from botocore.exceptions import ClientError
 from django.conf import settings
 from graphql import GraphQLError
 
+from accounts.tokens import InvalidAccessToken, KeySetUnavailable, verify_access_token
+
+
+def require_cognito_settings():
+    if not (settings.COGNITO_REGION and settings.COGNITO_USER_POOL_ID and settings.COGNITO_CLIENT_ID):
+        raise GraphQLError('Configure Cognito before using account operations')
+
 
 @lru_cache(maxsize=1)
 def get_cognito_client():
-    if not settings.COGNITO_REGION:
-        raise GraphQLError('Configure Cognito before using account operations')
+    require_cognito_settings()
     return boto3.client('cognito-idp', region_name=settings.COGNITO_REGION)
 
 
@@ -30,7 +36,17 @@ class Query(graphene.ObjectType):
         parts = authorization.split()
         if len(parts) != 2 or parts[0].lower() != 'bearer':
             raise GraphQLError('A Cognito access token is required')
+        require_cognito_settings()
         try:
+            claims = verify_access_token(parts[1])
+        except InvalidAccessToken:
+            raise GraphQLError('The access token is invalid or expired') from None
+        except KeySetUnavailable:
+            raise GraphQLError('Account service is unavailable') from None
+        if claims['username'] != username:
+            raise GraphQLError('Only your own canonical username can be requested')
+        try:
+            # Still ask Cognito: it rejects tokens revoked by sign-out before they expire.
             response = get_cognito_client().get_user(AccessToken=parts[1])
         except ClientError:
             raise GraphQLError('Cognito request failed') from None
