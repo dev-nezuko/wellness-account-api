@@ -118,4 +118,7 @@ GRAPHQL_INTROSPECTION = os.getenv('GRAPHQL_INTROSPECTION', str(DEBUG)).lower() =
 
 GRAPHENE = {
     'SCHEMA': 'fitness_tracker.schema.schema',
+    # graphene-django adds its SQL-tracing DjangoDebugMiddleware whenever DEBUG
+    # is on. There is no database here and no debug field in the schema.
+    'MIDDLEWARE': [],
 }

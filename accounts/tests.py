@@ -318,6 +318,11 @@ class GraphQLEndpointTests(StubbedCognitoTestCase):
         self.assertEqual(body['errors'][0]['message'], 'Internal server error')
         self.assertNotIn('PRIVATE_STACK_DETAIL', response.content.decode())
 
+    def test_graphene_debug_middleware_stays_off_in_debug_mode(self):
+        # With DEBUG=true it wrapped DB cursors and broke tests run from a .env.
+        from graphene_django.settings import graphene_settings
+        self.assertEqual(list(graphene_settings.MIDDLEWARE), [])
+
 
 class QueryLimitTests(StubbedCognitoTestCase):
     def post(self, query):
