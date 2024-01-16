@@ -111,6 +111,10 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+GRAPHQL_MAX_DEPTH = int(os.getenv('GRAPHQL_MAX_DEPTH', '5'))
+# Schema introspection (and GraphiQL's explorer) follows DEBUG unless set explicitly.
+GRAPHQL_INTROSPECTION = os.getenv('GRAPHQL_INTROSPECTION', str(DEBUG)).lower() == 'true'
+
 GRAPHENE = {
     'SCHEMA': 'fitness_tracker.schema.schema',
 }

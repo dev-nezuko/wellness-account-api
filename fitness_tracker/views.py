@@ -1,5 +1,7 @@
 import logging
 
+from django.conf import settings
+from graphene.validation import DisableIntrospection, depth_limit_validator
 from graphene_django.views import GraphQLView
 from graphql import GraphQLError
 
@@ -7,6 +9,14 @@ logger = logging.getLogger(__name__)
 
 
 class AccountGraphQLView(GraphQLView):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Introspection fields don't count towards the depth, so GraphiQL keeps working.
+        rules = [depth_limit_validator(max_depth=settings.GRAPHQL_MAX_DEPTH)]
+        if not settings.GRAPHQL_INTROSPECTION:
+            rules.append(DisableIntrospection)
+        self.validation_rules = tuple(rules)
+
     @staticmethod
     def format_error(error):
         formatted = GraphQLView.format_error(error)

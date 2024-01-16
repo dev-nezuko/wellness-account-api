@@ -7,7 +7,7 @@ import jwt
 from botocore.exceptions import EndpointConnectionError
 from botocore.stub import Stubber
 from cryptography.hazmat.primitives.asymmetric import rsa
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from accounts.schema import schema
 from accounts.tokens import cognito_issuer, jwks_client
@@ -316,3 +316,27 @@ class GraphQLEndpointTests(StubbedCognitoTestCase):
         body = response.json()
         self.assertEqual(body['errors'][0]['message'], 'Internal server error')
         self.assertNotIn('PRIVATE_STACK_DETAIL', response.content.decode())
+
+
+class QueryLimitTests(StubbedCognitoTestCase):
+    def post(self, query):
+        return self.client.post('/graphql', {'query': query}, content_type='application/json').json()
+
+    @override_settings(GRAPHQL_INTROSPECTION=False)
+    def test_introspection_is_off_in_production(self):
+        body = self.post('{ __schema { queryType { name } } }')
+        self.assertIn('introspection is disabled', body['errors'][0]['message'])
+
+    @override_settings(GRAPHQL_INTROSPECTION=True)
+    def test_introspection_can_be_enabled_and_is_not_depth_limited(self):
+        body = self.post('{ __schema { types { name fields { name type { name ofType { name ofType { name } } } } } } }')
+        self.assertNotIn('errors', body)
+
+    @override_settings(GRAPHQL_MAX_DEPTH=1)
+    def test_queries_deeper_than_the_limit_are_refused(self):
+        body = self.post(
+            'mutation { signup(username:"synthetic-user",name:"Synthetic User",'
+            'password:"offline-password",email:"synthetic@example.invalid") { user { username } } }'
+        )
+        self.assertIn('exceeds maximum operation depth', body['errors'][0]['message'])
+        self.cognito.assert_no_pending_responses()
