@@ -1,11 +1,19 @@
 import logging
 
 from django.conf import settings
+from django.http import JsonResponse
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 from graphene.validation import depth_limit_validator
 from graphene_django.views import GraphQLView
 from graphql import GraphQLError, ValidationRule
 
 logger = logging.getLogger(__name__)
+
+# Browsers can only send these cross-site after a CORS preflight, which the
+# CORS_ALLOWED_ORIGINS allowlist answers. Form and text/plain bodies need no
+# preflight, so they are refused rather than CSRF-exempted.
+PREFLIGHTED_BODY_TYPES = {'application/json', 'application/graphql'}
 
 
 class DisableSchemaIntrospection(ValidationRule):
@@ -16,6 +24,7 @@ class DisableSchemaIntrospection(ValidationRule):
             self.report_error(GraphQLError(f"Cannot query '{node.name.value}': introspection is disabled.", node))
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class AccountGraphQLView(GraphQLView):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -24,6 +33,11 @@ class AccountGraphQLView(GraphQLView):
         if not settings.GRAPHQL_INTROSPECTION:
             rules.append(DisableSchemaIntrospection)
         self.validation_rules = tuple(rules)
+
+    def dispatch(self, request, *args, **kwargs):
+        if request.method == 'POST' and self.get_content_type(request) not in PREFLIGHTED_BODY_TYPES:
+            return JsonResponse({'errors': [{'message': 'Send GraphQL requests as application/json'}]}, status=415)
+        return super().dispatch(request, *args, **kwargs)
 
     @staticmethod
     def format_error(error):

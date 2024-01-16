@@ -7,7 +7,7 @@ import jwt
 from botocore.exceptions import EndpointConnectionError
 from botocore.stub import Stubber
 from cryptography.hazmat.primitives.asymmetric import rsa
-from django.test import SimpleTestCase, override_settings
+from django.test import Client, SimpleTestCase, override_settings
 
 from accounts.schema import schema
 from accounts.tokens import cognito_issuer, jwks_client
@@ -345,3 +345,37 @@ class QueryLimitTests(StubbedCognitoTestCase):
         )
         self.assertIn('exceeds maximum operation depth', body['errors'][0]['message'])
         self.cognito.assert_no_pending_responses()
+
+
+class CrossSiteRequestTests(StubbedCognitoTestCase):
+    SIGNUP = (
+        'mutation { signup(username:"synthetic-user",name:"Synthetic User",'
+        'password:"offline-password",email:"synthetic@example.invalid") { user { username } } }'
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.browser = Client(enforce_csrf_checks=True)
+
+    def test_form_posts_cannot_run_mutations(self):
+        response = self.browser.post('/graphql', {'query': self.SIGNUP})
+        self.assertEqual(response.status_code, 415)
+        self.cognito.assert_no_pending_responses()
+
+    def test_text_plain_posts_are_refused(self):
+        response = self.browser.post('/graphql', '{"query": "{ __typename }"}', content_type='text/plain')
+        self.assertEqual(response.status_code, 415)
+
+    def test_get_cannot_run_mutations(self):
+        response = self.browser.get('/graphql', {'query': self.SIGNUP}, HTTP_ACCEPT='application/json')
+        self.assertEqual(response.status_code, 405)
+
+    def test_json_clients_need_no_csrf_token(self):
+        self.cognito.add_response('sign_up', {'UserConfirmed': False, 'UserSub': 'synthetic-user-id'})
+        response = self.browser.post('/graphql', {'query': self.SIGNUP}, content_type='application/json')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('errors', response.json())
+
+    def test_graphql_bodies_are_accepted(self):
+        response = self.browser.post('/graphql', '{ __typename }', content_type='application/graphql')
+        self.assertEqual(response.json(), {'data': {'__typename': 'Query'}})
