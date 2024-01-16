@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import boto3
 import jwt
+from botocore.exceptions import EndpointConnectionError
 from botocore.stub import Stubber
 from cryptography.hazmat.primitives.asymmetric import rsa
 from django.test import SimpleTestCase
@@ -51,6 +52,7 @@ class StubbedCognitoTestCase(SimpleTestCase):
             aws_access_key_id='offline',
             aws_secret_access_key='offline',
         )
+        self.cognito_client = client
         self.cognito = Stubber(client)
         self.cognito.activate()
         self.addCleanup(self.cognito.deactivate)
@@ -192,6 +194,57 @@ class AccessTokenVerificationTests(StubbedCognitoTestCase):
         self.assertEqual(result.errors[0].message, 'Account service is unavailable')
 
 
+class CognitoErrorTests(StubbedCognitoTestCase):
+    SIGNIN = 'mutation { signin(username:"synthetic-user",password:"offline-password") { accessToken } }'
+    SIGNUP = (
+        'mutation { signup(username:"synthetic-user",name:"Synthetic User",'
+        'password:"offline-password",email:"synthetic@example.invalid") { user { username } } }'
+    )
+    CONFIRM = 'mutation { confirmUser(username:"synthetic-user",otp:"123456") { success } }'
+
+    def error_for(self, query, operation, code):
+        self.cognito.add_client_error(operation, code, f'PRIVATE {code} DETAIL')
+        result = self.execute(query)
+        self.cognito.assert_no_pending_responses()
+        self.assertNotIn('PRIVATE', str(result.errors))
+        return result.errors[0].message
+
+    def test_wrong_password_and_unknown_user_look_the_same(self):
+        self.assertEqual(self.error_for(self.SIGNIN, 'initiate_auth', 'NotAuthorizedException'), 'Incorrect username or password')
+        self.assertEqual(self.error_for(self.SIGNIN, 'initiate_auth', 'UserNotFoundException'), 'Incorrect username or password')
+
+    def test_unconfirmed_user_is_told_to_confirm(self):
+        self.assertEqual(self.error_for(self.SIGNIN, 'initiate_auth', 'UserNotConfirmedException'), 'Confirm the account before signing in')
+
+    def test_signup_conflicts_and_weak_passwords(self):
+        self.assertEqual(self.error_for(self.SIGNUP, 'sign_up', 'UsernameExistsException'), 'That username is not available')
+        self.assertIn('password policy', self.error_for(self.SIGNUP, 'sign_up', 'InvalidPasswordException'))
+
+    def test_bad_code_and_unknown_user_look_the_same_on_confirmation(self):
+        for code in ('CodeMismatchException', 'ExpiredCodeException', 'UserNotFoundException'):
+            self.assertEqual(self.error_for(self.CONFIRM, 'confirm_sign_up', code), 'The confirmation code is invalid or expired')
+
+    def test_throttling_is_reported(self):
+        self.assertIn('try again later', self.error_for(self.SIGNIN, 'initiate_auth', 'TooManyRequestsException'))
+
+    def test_unexpected_codes_get_a_generic_message(self):
+        with self.assertLogs('accounts.schema', 'WARNING') as logs:
+            message = self.error_for(self.SIGNUP, 'sign_up', 'InternalErrorException')
+        self.assertIn('InternalErrorException', logs.output[0])
+        self.assertEqual(message, 'The account request could not be completed')
+
+    def test_unreachable_cognito_hides_the_endpoint(self):
+        error = EndpointConnectionError(endpoint_url='https://cognito-idp.private-endpoint.invalid')
+        with patch.object(self.cognito_client, 'initiate_auth', side_effect=error), self.assertLogs('accounts.schema', 'ERROR'):
+            result = self.execute(self.SIGNIN)
+        self.assertEqual(result.errors[0].message, 'Account service is unavailable')
+
+    def test_missing_configuration_is_reported_before_any_call(self):
+        with self.settings(COGNITO_USER_POOL_ID=''):
+            result = self.execute('{ getUser(username:"synthetic-user") { username } }', f'Bearer {self.token}')
+        self.assertIn('Configure Cognito', result.errors[0].message)
+
+
 class GraphQLEndpointTests(StubbedCognitoTestCase):
     def test_http_endpoint_serves_the_schema(self):
         self.cognito.add_response('get_user', PROFILE, {'AccessToken': self.token})
@@ -203,3 +256,15 @@ class GraphQLEndpointTests(StubbedCognitoTestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'data': {'getUser': {'username': 'synthetic-user'}}})
+
+    def test_unexpected_exceptions_are_masked_over_http(self):
+        with patch('accounts.schema.verify_access_token', side_effect=RuntimeError('PRIVATE_STACK_DETAIL')), self.assertLogs('fitness_tracker.views', 'ERROR'):
+            response = self.client.post(
+                '/graphql',
+                {'query': '{ getUser(username:"synthetic-user") { username } }'},
+                content_type='application/json',
+                HTTP_AUTHORIZATION=f'Bearer {self.token}',
+            )
+        body = response.json()
+        self.assertEqual(body['errors'][0]['message'], 'Internal server error')
+        self.assertNotIn('PRIVATE_STACK_DETAIL', response.content.decode())

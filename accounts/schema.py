@@ -1,12 +1,30 @@
+import logging
+from contextlib import contextmanager
 from functools import lru_cache
 
 import boto3
 import graphene
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 from graphql import GraphQLError
 
 from accounts.tokens import InvalidAccessToken, KeySetUnavailable, verify_access_token
+
+logger = logging.getLogger(__name__)
+
+BAD_TOKEN = 'The access token is invalid or expired'
+BAD_CREDENTIALS = 'Incorrect username or password'
+BAD_CODE = 'The confirmation code is invalid or expired'
+UNAVAILABLE = 'Account service is unavailable'
+
+# Client-safe messages for Cognito error codes that callers can act on.
+# Anything else becomes a generic message; Cognito's own text is never returned.
+SHARED_ERROR_MESSAGES = {
+    'TooManyRequestsException': 'Too many requests, try again later',
+    'LimitExceededException': 'Too many requests, try again later',
+    'TooManyFailedAttemptsException': 'Too many failed attempts, try again later',
+    'InvalidPasswordException': 'The password does not meet the account password policy',
+}
 
 
 def require_cognito_settings():
@@ -20,14 +38,35 @@ def get_cognito_client():
     return boto3.client('cognito-idp', region_name=settings.COGNITO_REGION)
 
 
-# User type
+@contextmanager
+def cognito_errors(messages):
+    """Turn Cognito/botocore failures into client-safe GraphQL errors."""
+    try:
+        yield
+    except ClientError as exc:
+        code = exc.response.get('Error', {}).get('Code', 'Unknown')
+        message = messages.get(code) or SHARED_ERROR_MESSAGES.get(code)
+        if message is None:
+            logger.warning('Cognito %s failed with %s', exc.operation_name, code)
+            message = 'The account request could not be completed'
+        raise GraphQLError(message) from None
+    except BotoCoreError as exc:
+        logger.error('Cognito is unreachable: %s', type(exc).__name__)
+        raise GraphQLError(UNAVAILABLE) from None
+
+
 class UserType(graphene.ObjectType):
     id = graphene.String()
     name = graphene.String()
     username = graphene.String()
     email = graphene.String()
 
-# Queries
+
+def profile_from(response):
+    attributes = {item['Name']: item['Value'] for item in response.get('UserAttributes', [])}
+    return UserType(id=attributes.get('sub'), name=attributes.get('name'), username=response['Username'], email=attributes.get('email'))
+
+
 class Query(graphene.ObjectType):
     get_user = graphene.Field(UserType, username=graphene.String(required=True))
 
@@ -40,22 +79,19 @@ class Query(graphene.ObjectType):
         try:
             claims = verify_access_token(parts[1])
         except InvalidAccessToken:
-            raise GraphQLError('The access token is invalid or expired') from None
+            raise GraphQLError(BAD_TOKEN) from None
         except KeySetUnavailable:
-            raise GraphQLError('Account service is unavailable') from None
+            raise GraphQLError(UNAVAILABLE) from None
         if claims['username'] != username:
             raise GraphQLError('Only your own canonical username can be requested')
-        try:
-            # Still ask Cognito: it rejects tokens revoked by sign-out before they expire.
+        # Still ask Cognito: it rejects tokens revoked by sign-out before they expire.
+        with cognito_errors({'NotAuthorizedException': BAD_TOKEN, 'UserNotFoundException': BAD_TOKEN}):
             response = get_cognito_client().get_user(AccessToken=parts[1])
-        except ClientError:
-            raise GraphQLError('Cognito request failed') from None
         if response.get('Username') != username:
             raise GraphQLError('Only your own canonical username can be requested')
-        attributes = {item['Name']: item['Value'] for item in response.get('UserAttributes', [])}
-        return UserType(id=attributes.get('sub'), name=attributes.get('name'), username=response['Username'], email=attributes.get('email'))
+        return profile_from(response)
 
-# Mutations
+
 class SignupMutation(graphene.Mutation):
     class Arguments:
         username = graphene.String(required=True)
@@ -66,20 +102,19 @@ class SignupMutation(graphene.Mutation):
     user = graphene.Field(UserType)
 
     def mutate(self, info, username, name, password, email):
-        try:
+        with cognito_errors({'UsernameExistsException': 'That username is not available'}):
             get_cognito_client().sign_up(
                 ClientId=settings.COGNITO_CLIENT_ID,
                 Username=username,
                 Password=password,
                 UserAttributes=[
                     {'Name': 'email', 'Value': email},
-                    {'Name': 'name', 'Value': name}
-                ]
+                    {'Name': 'name', 'Value': name},
+                ],
             )
-            return SignupMutation(user=UserType(username=username, email=email))
-        except ClientError:
-            raise GraphQLError('Cognito request failed') from None
-        
+        return SignupMutation(user=UserType(username=username, email=email))
+
+
 class UserConfirmationMutation(graphene.Mutation):
     class Arguments:
         username = graphene.String(required=True)
@@ -88,16 +123,15 @@ class UserConfirmationMutation(graphene.Mutation):
     success = graphene.Boolean()
 
     def mutate(self, info, username, otp):
-        try:
+        # Unknown users get the same answer as wrong codes so usernames can't be probed.
+        with cognito_errors({'CodeMismatchException': BAD_CODE, 'ExpiredCodeException': BAD_CODE, 'UserNotFoundException': BAD_CODE}):
             get_cognito_client().confirm_sign_up(
                 ClientId=settings.COGNITO_CLIENT_ID,
                 Username=username,
-                ConfirmationCode=otp
+                ConfirmationCode=otp,
             )
-            
-            return UserConfirmationMutation(success=True)
-        except ClientError:
-            raise GraphQLError('Cognito request failed') from None
+        return UserConfirmationMutation(success=True)
+
 
 class SigninMutation(graphene.Mutation):
     class Arguments:
@@ -111,26 +145,35 @@ class SigninMutation(graphene.Mutation):
     userEmail = graphene.String()
 
     def mutate(self, info, username, password):
-        try:
+        with cognito_errors({
+            'NotAuthorizedException': BAD_CREDENTIALS,
+            'UserNotFoundException': BAD_CREDENTIALS,
+            'UserNotConfirmedException': 'Confirm the account before signing in',
+            'PasswordResetRequiredException': 'A password reset is required before signing in',
+        }):
             res = get_cognito_client().initiate_auth(
                 ClientId=settings.COGNITO_CLIENT_ID,
                 AuthFlow='USER_PASSWORD_AUTH',
-                AuthParameters={'USERNAME': username, 'PASSWORD': password}
+                AuthParameters={'USERNAME': username, 'PASSWORD': password},
             )
-            if 'AuthenticationResult' not in res:
-                raise GraphQLError('Additional authentication challenge is not implemented')
-            token = res['AuthenticationResult']['AccessToken']
-            rtoken = res['AuthenticationResult']['RefreshToken']
-            response = get_cognito_client().get_user(AccessToken=token)
-            user_attributes = {attr['Name']: attr['Value'] for attr in response['UserAttributes']}
-            
-            return SigninMutation(accessToken=token, refreshToken=rtoken, userId=user_attributes.get('sub'), userName=response['Username'], userEmail=user_attributes.get('email'))
-        except ClientError:
-            raise GraphQLError('Cognito request failed') from None
+        if 'AuthenticationResult' not in res:
+            raise GraphQLError('Additional authentication challenge is not implemented')
+        tokens = res['AuthenticationResult']
+        with cognito_errors({}):
+            profile = profile_from(get_cognito_client().get_user(AccessToken=tokens['AccessToken']))
+        return SigninMutation(
+            accessToken=tokens['AccessToken'],
+            refreshToken=tokens.get('RefreshToken'),
+            userId=profile.id,
+            userName=profile.username,
+            userEmail=profile.email,
+        )
+
 
 class Mutation(graphene.ObjectType):
     signup = SignupMutation.Field()
     signin = SigninMutation.Field()
     confirm_user = UserConfirmationMutation.Field()
+
 
 schema = graphene.Schema(query=Query, mutation=Mutation)
