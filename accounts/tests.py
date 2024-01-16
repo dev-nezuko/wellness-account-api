@@ -11,6 +11,7 @@ from django.test import Client, SimpleTestCase, override_settings
 
 from accounts.schema import schema
 from accounts.tokens import cognito_issuer, jwks_client
+from fitness_tracker.env import env_list, env_origins
 
 # Generated per test run; the stubbed JWKS below is the only key set the code sees.
 SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -379,3 +380,30 @@ class CrossSiteRequestTests(StubbedCognitoTestCase):
     def test_graphql_bodies_are_accepted(self):
         response = self.browser.post('/graphql', '{ __typename }', content_type='application/graphql')
         self.assertEqual(response.json(), {'data': {'__typename': 'Query'}})
+
+
+class CorsSettingsTests(SimpleTestCase):
+    def test_env_lists_ignore_spaces_and_blanks(self):
+        with patch.dict('os.environ', {'ALLOWED_HOSTS': ' api.example.test , ,localhost '}):
+            self.assertEqual(env_list('ALLOWED_HOSTS'), ['api.example.test', 'localhost'])
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(env_list('ALLOWED_HOSTS', '127.0.0.1,localhost'), ['127.0.0.1', 'localhost'])
+
+    def test_origins_drop_trailing_slashes(self):
+        with patch.dict('os.environ', {'CORS_ALLOWED_ORIGINS': 'https://app.example.test/, http://localhost:3000'}):
+            self.assertEqual(env_origins('CORS_ALLOWED_ORIGINS'), ['https://app.example.test', 'http://localhost:3000'])
+
+    @override_settings(CORS_ALLOWED_ORIGINS=['https://app.example.test'])
+    def test_only_listed_origins_pass_the_preflight(self):
+        def preflight(origin):
+            return self.client.options(
+                '/graphql',
+                HTTP_ORIGIN=origin,
+                HTTP_ACCESS_CONTROL_REQUEST_METHOD='POST',
+                HTTP_ACCESS_CONTROL_REQUEST_HEADERS='authorization, content-type',
+            )
+
+        allowed = preflight('https://app.example.test')
+        self.assertEqual(allowed['Access-Control-Allow-Origin'], 'https://app.example.test')
+        self.assertIn('authorization', allowed['Access-Control-Allow-Headers'])
+        self.assertNotIn('Access-Control-Allow-Origin', preflight('https://evil.example.test'))

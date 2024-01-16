@@ -15,6 +15,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from fitness_tracker.env import env_list, env_origins
+
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
@@ -41,7 +43,7 @@ if not SECRET_KEY:
     from django.core.management.utils import get_random_secret_key
     SECRET_KEY = get_random_secret_key()
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
+ALLOWED_HOSTS = env_list('ALLOWED_HOSTS', '127.0.0.1,localhost')
 
 
 # Application definition
@@ -66,7 +68,7 @@ MIDDLEWARE = [
 ROOT_URLCONF = 'fitness_tracker.urls'
 
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv('CORS_ALLOWED_ORIGINS', '').split(',') if origin]
+CORS_ALLOWED_ORIGINS = env_origins('CORS_ALLOWED_ORIGINS')
 
 TEMPLATES = [
     {
