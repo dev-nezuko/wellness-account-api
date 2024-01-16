@@ -327,6 +327,11 @@ class QueryLimitTests(StubbedCognitoTestCase):
         body = self.post('{ __schema { queryType { name } } }')
         self.assertIn('introspection is disabled', body['errors'][0]['message'])
 
+    @override_settings(GRAPHQL_INTROSPECTION=False)
+    def test_type_lookups_are_off_but_typename_still_works(self):
+        self.assertIn('introspection is disabled', self.post('{ __type(name:"Query") { name } }')['errors'][0]['message'])
+        self.assertEqual(self.post('{ __typename }'), {'data': {'__typename': 'Query'}})
+
     @override_settings(GRAPHQL_INTROSPECTION=True)
     def test_introspection_can_be_enabled_and_is_not_depth_limited(self):
         body = self.post('{ __schema { types { name fields { name type { name ofType { name ofType { name } } } } } } }')

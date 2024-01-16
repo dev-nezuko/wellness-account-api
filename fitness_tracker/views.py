@@ -1,11 +1,19 @@
 import logging
 
 from django.conf import settings
-from graphene.validation import DisableIntrospection, depth_limit_validator
+from graphene.validation import depth_limit_validator
 from graphene_django.views import GraphQLView
-from graphql import GraphQLError
+from graphql import GraphQLError, ValidationRule
 
 logger = logging.getLogger(__name__)
+
+
+class DisableSchemaIntrospection(ValidationRule):
+    # graphene's DisableIntrospection also rejects __typename, which Apollo and
+    # Relay clients add to every selection; only the schema queries are blocked.
+    def enter_field(self, node, *_args):
+        if node.name.value in ('__schema', '__type'):
+            self.report_error(GraphQLError(f"Cannot query '{node.name.value}': introspection is disabled.", node))
 
 
 class AccountGraphQLView(GraphQLView):
@@ -14,7 +22,7 @@ class AccountGraphQLView(GraphQLView):
         # Introspection fields don't count towards the depth, so GraphiQL keeps working.
         rules = [depth_limit_validator(max_depth=settings.GRAPHQL_MAX_DEPTH)]
         if not settings.GRAPHQL_INTROSPECTION:
-            rules.append(DisableIntrospection)
+            rules.append(DisableSchemaIntrospection)
         self.validation_rules = tuple(rules)
 
     @staticmethod
