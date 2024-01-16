@@ -9,6 +9,7 @@ from django.conf import settings
 from graphql import GraphQLError
 
 from accounts.tokens import InvalidAccessToken, KeySetUnavailable, verify_access_token
+from accounts.validation import clean_confirmation_code, clean_email, clean_name, clean_password, clean_username
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,8 @@ class SignupMutation(graphene.Mutation):
     user = graphene.Field(UserType)
 
     def mutate(self, info, username, name, password, email):
+        username, name = clean_username(username), clean_name(name)
+        password, email = clean_password(password), clean_email(email)
         with cognito_errors({'UsernameExistsException': 'That username is not available'}):
             get_cognito_client().sign_up(
                 ClientId=settings.COGNITO_CLIENT_ID,
@@ -112,7 +115,7 @@ class SignupMutation(graphene.Mutation):
                     {'Name': 'name', 'Value': name},
                 ],
             )
-        return SignupMutation(user=UserType(username=username, email=email))
+        return SignupMutation(user=UserType(username=username, name=name, email=email))
 
 
 class UserConfirmationMutation(graphene.Mutation):
@@ -123,6 +126,7 @@ class UserConfirmationMutation(graphene.Mutation):
     success = graphene.Boolean()
 
     def mutate(self, info, username, otp):
+        username, otp = clean_username(username), clean_confirmation_code(otp)
         # Unknown users get the same answer as wrong codes so usernames can't be probed.
         with cognito_errors({'CodeMismatchException': BAD_CODE, 'ExpiredCodeException': BAD_CODE, 'UserNotFoundException': BAD_CODE}):
             get_cognito_client().confirm_sign_up(
@@ -145,6 +149,7 @@ class SigninMutation(graphene.Mutation):
     userEmail = graphene.String()
 
     def mutate(self, info, username, password):
+        username, password = clean_username(username), clean_password(password)
         with cognito_errors({
             'NotAuthorizedException': BAD_CREDENTIALS,
             'UserNotFoundException': BAD_CREDENTIALS,

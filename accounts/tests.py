@@ -245,6 +245,54 @@ class CognitoErrorTests(StubbedCognitoTestCase):
         self.assertIn('Configure Cognito', result.errors[0].message)
 
 
+class InputValidationTests(StubbedCognitoTestCase):
+    def signup(self, username='synthetic-user', name='Synthetic User', password='offline-password', email='synthetic@example.invalid'):
+        query = 'mutation($u:String!,$n:String!,$p:String!,$e:String!) { signup(username:$u,name:$n,password:$p,email:$e) { user { name email } } }'
+        return schema.execute(query, variables={'u': username, 'n': name, 'p': password, 'e': email}, context_value=SimpleNamespace(headers={}))
+
+    def assert_invalid(self, result, field):
+        self.assertEqual(result.errors[0].extensions, {'field': field})
+        self.cognito.assert_no_pending_responses()
+
+    def test_signup_rejects_bad_fields_before_calling_cognito(self):
+        self.assert_invalid(self.signup(username=''), 'username')
+        self.assert_invalid(self.signup(username='has space'), 'username')
+        self.assert_invalid(self.signup(username='u' * 129), 'username')
+        self.assert_invalid(self.signup(name='   '), 'name')
+        self.assert_invalid(self.signup(name='Line\nbreak'), 'name')
+        self.assert_invalid(self.signup(password=''), 'password')
+        self.assert_invalid(self.signup(password='p' * 257), 'password')
+        self.assert_invalid(self.signup(email='not-an-email'), 'email')
+
+    def test_signup_sends_trimmed_name_and_email(self):
+        self.cognito.add_response(
+            'sign_up',
+            {'UserConfirmed': False, 'UserSub': 'synthetic-user-id'},
+            {
+                'ClientId': 'offline-client-id',
+                'Username': 'synthetic-user',
+                'Password': 'offline-password',
+                'UserAttributes': [
+                    {'Name': 'email', 'Value': 'synthetic@example.invalid'},
+                    {'Name': 'name', 'Value': 'Synthetic User'},
+                ],
+            },
+        )
+        result = self.signup(name='  Synthetic User ', email=' synthetic@example.invalid ')
+        self.assertIsNone(result.errors)
+        self.assertEqual(result.data['signup']['user'], {'name': 'Synthetic User', 'email': 'synthetic@example.invalid'})
+        self.cognito.assert_no_pending_responses()
+
+    def test_confirmation_code_must_be_six_digits(self):
+        for code in ('', '12345', '1234567', 'abcdef'):
+            result = self.execute(f'mutation {{ confirmUser(username:"synthetic-user",otp:"{code}") {{ success }} }}')
+            self.assert_invalid(result, 'otp')
+
+    def test_signin_rejects_blank_credentials(self):
+        self.assert_invalid(self.execute('mutation { signin(username:"",password:"x") { accessToken } }'), 'username')
+        self.assert_invalid(self.execute('mutation { signin(username:"synthetic-user",password:"") { accessToken } }'), 'password')
+
+
 class GraphQLEndpointTests(StubbedCognitoTestCase):
     def test_http_endpoint_serves_the_schema(self):
         self.cognito.add_response('get_user', PROFILE, {'AccessToken': self.token})
