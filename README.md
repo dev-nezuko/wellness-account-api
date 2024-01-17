@@ -44,14 +44,20 @@ To get a local copy up and running, follow these simple steps.
    ```
    Edit `.env` and fill in your AWS credentials.
 
-3. **Install Dependencies**:
+3. **Set Up and activate Python Virtual Environment**:
+   ```bash
+   python3 -m venv altercall_venv
+   source altercall_venv/bin/activate
+   ```
+
+4. **Install Dependencies**:
    Install the required Python libraries for the project:
    
    ```bash
    pip install -r requirements.txt
    ```
 
-4. **Run the Server**:
+5. **Run the Server**:
    Launch the application locally:
    
    ```bash
